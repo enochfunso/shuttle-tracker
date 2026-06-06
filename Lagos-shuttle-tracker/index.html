@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lagos Shuttle Tracker</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { font-family: 'Segoe UI', sans-serif; background:#f5f5f5; }
+
+        /* Views */
+        .view { display:none; width:100vw; height:100vh; }
+        .view.active { display:flex; flex-direction:column; align-items:center; justify-content:center; }
+
+        /* Landing */
+        #landing { background: linear-gradient(135deg, #1e3c72, #2a5298); color:white; }
+        #landing .logo { font-size: 5rem; margin-bottom: 20px; }
+        #landing h1 { font-size: 2.5rem; margin-bottom: 10px; }
+        #landing p { font-size: 1.2rem; opacity:0.9; margin-bottom: 30px; }
+        #continueBtn {
+            padding: 15px 40px;
+            font-size: 1.2rem;
+            border: none;
+            border-radius: 30px;
+            background: #ffc107;
+            color: #333;
+            cursor: pointer;
+            font-weight: bold;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.2);
+            transition: transform 0.2s;
+        }
+        #continueBtn:hover { transform: scale(1.05); }
+
+        /* Route List */
+        #routeList {
+            background: white;
+            padding: 30px;
+            flex-direction: column;
+            align-items: stretch;
+            justify-content: flex-start;
+        }
+        #routeList h2 { margin-bottom: 20px; text-align:center; font-size:2rem; }
+        .route-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            gap: 15px;
+            overflow-y: auto;
+            padding: 0 20px;
+            max-height: 70vh;
+        }
+        .route-card {
+            background: #e3f2fd;
+            padding: 20px;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: 0.2s;
+            border: 2px solid transparent;
+        }
+        .route-card:hover { border-color: #1e88e5; transform: translateY(-2px); box-shadow:0 4px 8px rgba(0,0,0,0.1); }
+        .route-card .route-name { font-weight:bold; font-size:1.1rem; }
+        .route-card .vehicle-count { color:#555; margin-top:5px; }
+
+        /* Map view */
+        #mapView { flex-direction:column; align-items:stretch; }
+        #map { flex:1; }
+        .back-btn {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 1000;
+            background: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 20px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+            cursor: pointer;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- LANDING PAGE -->
+    <div id="landing" class="view active">
+        <div class="logo">🚌</div>
+        <h1>Lagos Shuttle Tracker</h1>
+        <p>Track buses and cars across Lagos in real-time</p>
+        <button id="continueBtn">Continue →</button>
+    </div>
+
+    <!-- ROUTE SELECTION -->
+    <div id="routeList" class="view">
+        <h2>Select a Route</h2>
+        <div class="route-grid" id="routeContainer"></div>
+    </div>
+
+    <!-- MAP VIEW -->
+    <div id="mapView" class="view">
+        <button class="back-btn" id="backBtn">← Back to Routes</button>
+        <div id="map" style="height:100%;"></div>
+    </div>
+
+    <script>
+        // DOM elements
+        const landing = document.getElementById('landing');
+        const routeList = document.getElementById('routeList');
+        const mapView = document.getElementById('mapView');
+        const continueBtn = document.getElementById('continueBtn');
+        const backBtn = document.getElementById('backBtn');
+        const routeContainer = document.getElementById('routeContainer');
+
+        let routesData = [];
+        let selectedRoute = null;
+        let map = null;
+        let ws = null;
+        let markers = new Map();
+
+        // --- View switching ---
+        function showView(view) {
+            landing.classList.remove('active');
+            routeList.classList.remove('active');
+            mapView.classList.remove('active');
+            view.classList.add('active');
+        }
+
+        // --- Landing: continue clicked ---
+        continueBtn.addEventListener('click', async () => {
+            // Fetch routes from API
+            try {
+                const res = await fetch('/api/routes');
+                routesData = await res.json();
+            } catch (err) {
+                alert('Failed to load routes. Make sure the server is running.');
+                return;
+            }
+            renderRouteList();
+            showView(routeList);
+        });
+
+        // --- Render route list ---
+        function renderRouteList() {
+            routeContainer.innerHTML = '';
+            routesData.forEach(route => {
+                const card = document.createElement('div');
+                card.className = 'route-card';
+                card.innerHTML = `<div class="route-name">${route.name}</div>
+                                  <div class="vehicle-count">🚌🚗 Vehicles running...</div>`;
+                card.addEventListener('click', () => selectRoute(route));
+                routeContainer.appendChild(card);
+            });
+        }
+
+        // --- Route selected ---
+        function selectRoute(route) {
+            selectedRoute = route;
+            showView(mapView);
+            initMap(route);
+        }
+
+        // --- Initialise map for a route ---
+        function initMap(route) {
+            // Clear previous map
+            if (map) {
+                map.remove();
+                markers.clear();
+                if (ws) ws.close();
+            }
+
+            // Create map
+            map = L.map('map').setView([6.5244, 3.3792], 13);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 19,
+                attribution: '© OpenStreetMap'
+            }).addTo(map);
+
+            // Draw route polyline
+            const polyline = L.polyline(route.waypoints, {color: '#1e88e5', weight: 4, opacity: 0.7}).addTo(map);
+
+            // Fit bounds to route
+            const bounds = L.latLngBounds(route.waypoints);
+            map.fitBounds(bounds, {padding: [30,30]});
+
+            // Connect WebSocket
+            ws = new WebSocket(`ws://${location.hostname}:8765/ws`);
+            ws.onmessage = (event) => {
+                const vehicles = JSON.parse(event.data);
+                const now = Date.now();
+
+                // Filter vehicles belonging to this route
+                const routeVehicles = vehicles.filter(v => v.route === selectedRoute.name);
+                const currentIds = new Set(routeVehicles.map(v => v.id));
+
+                // Update/add markers
+                routeVehicles.forEach(vehicle => {
+                    const {id, type, name, lat, lon, speed_kmh} = vehicle;
+                    const icon = type === 'bus' ? busIcon : carIcon;
+                    const marker = markers.get(id);
+                    if (marker) {
+                        marker.setLatLng([lat, lon]);
+                        marker.setIcon(icon);
+                        marker.lastSeen = now;
+                        marker.getPopup().setContent(`${name}<br>Type: ${type}<br>Speed: ${speed_kmh} km/h`);
+                    } else {
+                        const newMarker = L.marker([lat, lon], {icon}).addTo(map);
+                        newMarker.bindPopup(`${name}<br>Type: ${type}<br>Speed: ${speed_kmh} km/h`);
+                        newMarker.lastSeen = now;
+                        markers.set(id, newMarker);
+                    }
+                });
+
+                // Remove stale markers
+                markers.forEach((marker, id) => {
+                    if (!currentIds.has(id) && now - marker.lastSeen > 5000) {
+                        map.removeLayer(marker);
+                        markers.delete(id);
+                    }
+                });
+            };
+        }
+
+        // --- Back button ---
+        backBtn.addEventListener('click', () => {
+            if (ws) ws.close();
+            showView(routeList);
+        });
+
+        // --- SVG Icons (same as before) ---
+        const busSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="32" height="32">
+            <rect x="48" y="112" width="416" height="256" rx="32" fill="#FFC107" stroke="#333" stroke-width="16"/>
+            <rect x="80" y="144" width="100" height="60" rx="8" fill="#FFF" stroke="#333" stroke-width="4"/>
+            <rect x="200" y="144" width="100" height="60" rx="8" fill="#FFF" stroke="#333" stroke-width="4"/>
+            <rect x="320" y="144" width="100" height="60" rx="8" fill="#FFF" stroke="#333" stroke-width="4"/>
+            <circle cx="150" cy="400" r="30" fill="#333"/>
+            <circle cx="362" cy="400" r="30" fill="#333"/>
+            <circle cx="150" cy="400" r="14" fill="#666"/>
+            <circle cx="362" cy="400" r="14" fill="#666"/>
+            <rect x="32" y="96" width="448" height="32" rx="16" fill="#FFC107" stroke="#333" stroke-width="12"/>
+            <rect x="100" y="60" width="140" height="40" rx="8" fill="#333"/>
+        </svg>`;
+
+        const carSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="32" height="32">
+            <path d="M128 288 L160 288 L160 384 L128 384 Z" fill="#333"/>
+            <path d="M352 288 L384 288 L384 384 L352 384 Z" fill="#333"/>
+            <rect x="96" y="192" width="320" height="96" rx="16" fill="#2196F3" stroke="#333" stroke-width="12"/>
+            <rect x="120" y="160" width="272" height="40" rx="12" fill="#2196F3" stroke="#333" stroke-width="10"/>
+            <rect x="160" y="144" width="192" height="24" rx="6" fill="#90CAF9" stroke="#333" stroke-width="6"/>
+            <circle cx="160" cy="400" r="28" fill="#333"/>
+            <circle cx="352" cy="400" r="28" fill="#333"/>
+            <circle cx="160" cy="400" r="12" fill="#999"/>
+            <circle cx="352" cy="400" r="12" fill="#999"/>
+            <rect x="80" y="200" width="16" height="10" rx="2" fill="#FFC107"/>
+            <rect x="416" y="200" width="16" height="10" rx="2" fill="#FFC107"/>
+        </svg>`;
+
+        const busIcon = L.divIcon({html: busSvg, className: 'vehicle-icon', iconSize: [32,32], popupAnchor: [0,-16]});
+        const carIcon = L.divIcon({html: carSvg, className: 'vehicle-icon', iconSize: [32,32], popupAnchor: [0,-16]});
+    </script>
+</body>
+</html>
