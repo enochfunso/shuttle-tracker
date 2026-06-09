@@ -12,30 +12,35 @@ import uvicorn
 from routes import LAGOS_ROUTES
 
 app = FastAPI()
-app.mount("/static", StaticFiles(directory="."), name="static")
 
-# ------------------------------------------------
-# 1. Landing page – the new HTML
-# ------------------------------------------------
+# Serve the "public" folder for background image
+app.mount("/public", StaticFiles(directory="public"), name="public")
+
+# Serve dashboard
 @app.get("/")
 async def root():
     return HTMLResponse(Path("index.html").read_text())
 
-# ------------------------------------------------
-# 2. API: all routes (name + waypoints)
-# ------------------------------------------------
+# ------------------------------------------------------------------
+# API: all routes with name, waypoints, and current bus count
+# ------------------------------------------------------------------
+# We'll build a mapping route_name -> vehicle count after creating vehicles
+route_counts = {}
+
 @app.get("/api/routes")
 async def get_routes():
-    # Return route names and waypoints (just the first & last point is enough for bounds,
-    # but we return all for drawing the polyline)
     return [
-        {"name": r["name"], "waypoints": r["waypoints"]}
+        {
+            "name": r["name"],
+            "waypoints": r["waypoints"],
+            "bus_count": route_counts.get(r["name"], 0)
+        }
         for r in LAGOS_ROUTES
     ]
 
-# ------------------------------------------------
-# 3. WebSocket – unchanged
-# ------------------------------------------------
+# ------------------------------------------------------------------
+# WebSocket (unchanged)
+# ------------------------------------------------------------------
 connected_clients = set()
 
 @app.websocket("/ws")
@@ -59,18 +64,18 @@ async def broadcast(data):
         return_exceptions=True
     )
 
-# ------------------------------------------------
-# 4. Vehicle simulation – unchanged
-# ------------------------------------------------
+# ------------------------------------------------------------------
+# Vehicle simulation – 500 BUSES only
+# ------------------------------------------------------------------
 class Vehicle:
     def __init__(self, vehicle_id, route):
         self.id = vehicle_id
         self.route = route["waypoints"]
         self.route_name = route["name"]
-        self.vehicle_type = random.choice(["bus", "car"])
+        self.vehicle_type = "bus"               # all buses now
         self.segment_index = random.randint(0, len(self.route) - 2)
         self.progress = random.random()
-        self.speed = random.uniform(20, 55) * 0.000005
+        self.speed = random.uniform(20, 50) * 0.000005
 
     def update_position(self, dt):
         self.progress += self.speed * dt * 100
@@ -97,12 +102,20 @@ class Vehicle:
             "name": self.route_name,
             "lat": lat,
             "lon": lon,
-            "route": self.route_name,   # needed for filtering
+            "route": self.route_name,
             "speed_kmh": round(self.speed / 0.000005, 1)
         }
 
-VEHICLE_COUNT = 60
-vehicles = [Vehicle(i, random.choice(LAGOS_ROUTES)) for i in range(VEHICLE_COUNT)]
+# Distribute 500 buses randomly across all routes
+VEHICLE_COUNT = 500
+vehicles = []
+# Pre‑fill count dictionary
+route_counts = {r["name"]: 0 for r in LAGOS_ROUTES}
+
+for i in range(VEHICLE_COUNT):
+    route = random.choice(LAGOS_ROUTES)
+    vehicles.append(Vehicle(i, route))
+    route_counts[route["name"]] += 1
 
 async def simulator():
     interval = 0.5
